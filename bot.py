@@ -12,7 +12,10 @@ from telegram.ext import (
 )
 from openai import OpenAI
 
-from renderer import render_card
+try:
+    from renderer import render_card
+except ImportError:
+    from renderizador import render_card
 
 load_dotenv()
 
@@ -324,8 +327,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "vertical_top": c["vertical_alignment"] = "top"
     elif d == "vertical_center": c["vertical_alignment"] = "center"
     elif d == "vertical_bottom": c["vertical_alignment"] = "bottom"
-    elif d.startswith("spacing_"): c["line_spacing"] = int(d.split("_")[1])
-    elif d.startswith("capacity_"): c["text_capacity"] = int(d.split("_")[1])
+    elif d.startswith("spacing_") and d != "spacing_menu": c["line_spacing"] = int(d.split("_")[1])
+    elif d.startswith("capacity_") and d != "capacity_menu": c["text_capacity"] = int(d.split("_")[1])
     elif d.startswith("watermark_pos_"): c["watermark_position"] = d.split("_")[-1]
     elif d == "watermark_menu":
         kb = simple_menu("", [
