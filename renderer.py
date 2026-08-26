@@ -2,6 +2,8 @@ from io import BytesIO
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
+# Fontes suportadas pelo menu do bot.
+# O Dockerfile instala as famílias adicionais no ambiente do Railway.
 FONT_CANDIDATES = {
     "Montserrat ExtraBold": [
         "/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf",
@@ -13,17 +15,77 @@ FONT_CANDIDATES = {
         "/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ],
+    "Open Sans Bold": [
+        "/usr/share/fonts/truetype/open-sans/OpenSans-Bold.ttf",
+        "/usr/share/fonts/truetype/open-sans/OpenSans-ExtraBold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+    "Roboto Bold": [
+        "/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Bold.ttf",
+        "/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+    "Lato Bold": [
+        "/usr/share/fonts/truetype/lato/Lato-Bold.ttf",
+        "/usr/share/fonts/truetype/lato/Lato-Heavy.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+    "Ubuntu Bold": [
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+    "League Spartan Bold": [
+        "/usr/share/fonts/truetype/league-spartan/LeagueSpartan-Bold.ttf",
+        "/usr/share/fonts/truetype/league-spartan/LeagueSpartan-Bold.otf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
     "DejaVu Sans Bold": [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ],
 }
 
+# Fallback por padrões de nome. Isso torna o renderer mais resistente a pequenas
+# diferenças de caminho entre imagens Debian/Ubuntu.
+FONT_GLOBS = {
+    "Open Sans Bold": ["OpenSans-Bold.ttf", "OpenSans-ExtraBold.ttf"],
+    "Roboto Bold": ["Roboto-Bold.ttf"],
+    "Lato Bold": ["Lato-Bold.ttf", "Lato-Heavy.ttf"],
+    "Ubuntu Bold": ["Ubuntu-B.ttf", "Ubuntu-Bold.ttf"],
+    "League Spartan Bold": ["LeagueSpartan-Bold.ttf", "LeagueSpartan-Bold.otf"],
+}
+
 
 def find_font(name="Montserrat ExtraBold"):
-    candidates = FONT_CANDIDATES.get(name, FONT_CANDIDATES["Montserrat ExtraBold"])
+    candidates = FONT_CANDIDATES.get(
+        name,
+        FONT_CANDIDATES["Montserrat ExtraBold"]
+    )
+
     for p in candidates:
         if Path(p).exists():
             return p
+
+    # Procura em diretórios padrão por nome de arquivo.
+    patterns = FONT_GLOBS.get(name, [])
+    roots = [
+        Path("/usr/share/fonts"),
+        Path("/usr/local/share/fonts"),
+        Path("fonts"),
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        for filename in patterns:
+            matches = list(root.rglob(filename))
+            if matches:
+                return str(matches[0])
+
+    # Último fallback: DejaVu Sans Bold.
+    fallback = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    if fallback.exists():
+        return str(fallback)
+
     raise FileNotFoundError("Nenhuma fonte compatível encontrada.")
 
 
