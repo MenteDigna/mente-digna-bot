@@ -44,6 +44,7 @@ DEFAULT_CONFIG = {
     "text_size": 82,
     "line_spacing": 10,
     "text_capacity": 100,
+    "text_width": 600,
     "watermark": "@mentedigna",
     "watermark_color": "#9A9A9A",
     "watermark_position": "left",
@@ -168,8 +169,9 @@ def config_menu():
          InlineKeyboardButton("📏 Espaçamento", callback_data="spacing_menu")],
         [InlineKeyboardButton("🔠 Tamanho", callback_data="text_size_menu"),
          InlineKeyboardButton("📐 Capacidade", callback_data="capacity_menu")],
-        [InlineKeyboardButton("↔️ Margens", callback_data="margins_menu"),
-         InlineKeyboardButton("↕️ Posição vertical", callback_data="vertical_menu")],
+        [InlineKeyboardButton("📏 Largura da área", callback_data="text_width_menu"),
+         InlineKeyboardButton("↔️ Margens", callback_data="margins_menu")],
+        [InlineKeyboardButton("↕️ Posição vertical", callback_data="vertical_menu")],
         [InlineKeyboardButton("💾 Salvar layout", callback_data="save_layout"),
          InlineKeyboardButton("📂 Meus layouts", callback_data="layouts")],
         [InlineKeyboardButton("⬅️ Voltar", callback_data="back")],
@@ -186,6 +188,7 @@ def show_config_text(c):
         f"• Tamanho: `{c.get('text_size',82)} px`\n"
         f"• Espaçamento: `{c.get('line_spacing',10)}%`\n"
         f"• Capacidade: `{c.get('text_capacity',100)}%`\n"
+        f"• Largura da área: `{c.get('text_width',600)} px`\n"
         f"• Cor do texto: `{c.get('text_color','#000000')}`\n"
         f"• Cor das aspas: `{c.get('quote_color','#FF1717')}`\n"
         f"• Aspas: `{'SIM' if c.get('quotes',True) else 'NÃO'}`\n"
@@ -418,6 +421,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             c["text_capacity"] = value
 
+        elif waiting == "text_width":
+            try:
+                value = int(text)
+            except ValueError:
+                await update.message.reply_text("Envie um número inteiro.")
+                return
+            if not 300 <= value <= 900:
+                await update.message.reply_text("Use uma largura entre 300 e 900 px.")
+                return
+            c["text_width"] = value
+
         elif waiting == "background_opacity":
             try:
                 value = int(text)
@@ -564,6 +578,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # CAPACIDADE
     elif d.startswith("capacity_") and d != "capacity_menu":
         c["text_capacity"] = int(d.split("_")[-1])
+    elif d.startswith("textwidth_"):
+        c["text_width"] = int(d.split("_")[-1])
 
     # TAMANHO
     elif d.startswith("textsize_"):
@@ -675,6 +691,23 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    elif d == "text_width_menu":
+        values = [450, 475, 500, 525, 550, 575, 600, 625, 650, 675, 700, 725, 750, 800]
+        rows = []
+        for i in range(0, len(values), 4):
+            rows.append([
+                InlineKeyboardButton(f"{v}px", callback_data=f"textwidth_{v}")
+                for v in values[i:i + 4]
+            ])
+        rows.append([InlineKeyboardButton("✏️ Personalizado", callback_data="text_width")])
+        await query.edit_message_text(
+            "📏 *LARGURA DA ÁREA DO TEXTO*\\n\\n"
+            "Define o limite horizontal real do bloco de texto.\\n"
+            "Para o estilo de referência, comece em *600 px*.",
+            reply_markup=simple_menu(rows), parse_mode="Markdown"
+        )
+        return
+
     elif d == "margins_menu":
         await query.edit_message_text(
             "↔️ *MARGENS DO TEXTO*",
@@ -746,7 +779,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "watermark_name", "font_custom", "text_size", "watermark_size",
         "left_margin", "right_margin", "top_margin", "bottom_margin",
         "watermark_bottom", "quote_size", "quote_offset",
-        "background_opacity", "spacing_custom", "capacity_custom", "width_height"
+        "background_opacity", "spacing_custom", "capacity_custom", "text_width", "width_height"
     }:
         prompts = {
             "text_color": "🎨 Envie a cor do texto em HEX, por exemplo `#000000`.",
@@ -767,6 +800,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "background_opacity": "🌫️ Envie a opacidade do fundo entre 0 e 100.",
             "spacing_custom": "📏 Digite o espaçamento entre linhas. Exemplo: `15`.",
             "capacity_custom": "📐 Digite a capacidade/área. Exemplo: `92`.",
+            "text_width": "📏 Digite a largura da área do texto em pixels. Exemplo: `600`.",
             "width_height": "📐 Envie largura x altura, por exemplo `1080x1350`.",
         }
         context.user_data["waiting_config_input"] = d
