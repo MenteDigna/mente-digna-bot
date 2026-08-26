@@ -152,7 +152,7 @@ def render_card(text, cfg):
     wb = draw.textbbox((0, 0), wm, font=wm_font)
     ww = wb[2] - wb[0]
     wh = wb[3] - wb[1]
-    wm_y = H - int(cfg.get("watermark_bottom", 205))
+    wm_y = H - int(cfg.get("watermark_bottom", 205)) - wh
     if wm_pos == "center":
         wm_x = (W - ww) // 2
     elif wm_pos == "right":
