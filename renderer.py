@@ -20,9 +20,19 @@ FONT_CANDIDATES = {
         "/usr/share/fonts/truetype/open-sans/OpenSans-ExtraBold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ],
+    "Open Sans ExtraBold": [
+        "/usr/share/fonts/truetype/open-sans/OpenSans-ExtraBold.ttf",
+        "/usr/share/fonts/truetype/open-sans/OpenSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
     "Roboto Bold": [
         "/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Bold.ttf",
         "/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+    "Roboto Black": [
+        "/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Black.ttf",
+        "/usr/share/fonts/truetype/roboto/Roboto-Black.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ],
     "Lato Bold": [
@@ -30,9 +40,29 @@ FONT_CANDIDATES = {
         "/usr/share/fonts/truetype/lato/Lato-Heavy.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ],
+    "Lato Black": [
+        "/usr/share/fonts/truetype/lato/Lato-Black.ttf",
+        "/usr/share/fonts/truetype/lato/Lato-Heavy.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+    "Liberation Sans Bold": [
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+    "Noto Sans Bold": [
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
     "Ubuntu Bold": [
         "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
         "/usr/share/fonts/truetype/ubuntu/Ubuntu-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+    "League Spartan": [
+        "/usr/share/fonts/truetype/league-spartan/LeagueSpartan-Bold.ttf",
+        "/usr/share/fonts/truetype/league-spartan/LeagueSpartan-Bold.otf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ],
     "League Spartan Bold": [
@@ -49,9 +79,15 @@ FONT_CANDIDATES = {
 # diferenças de caminho entre imagens Debian/Ubuntu.
 FONT_GLOBS = {
     "Open Sans Bold": ["OpenSans-Bold.ttf", "OpenSans-ExtraBold.ttf"],
+    "Open Sans ExtraBold": ["OpenSans-ExtraBold.ttf", "OpenSans-Bold.ttf"],
     "Roboto Bold": ["Roboto-Bold.ttf"],
+    "Roboto Black": ["Roboto-Black.ttf", "Roboto-Bold.ttf"],
     "Lato Bold": ["Lato-Bold.ttf", "Lato-Heavy.ttf"],
+    "Lato Black": ["Lato-Black.ttf", "Lato-Heavy.ttf"],
+    "Liberation Sans Bold": ["LiberationSans-Bold.ttf"],
+    "Noto Sans Bold": ["NotoSans-Bold.ttf"],
     "Ubuntu Bold": ["Ubuntu-B.ttf", "Ubuntu-Bold.ttf"],
+    "League Spartan": ["LeagueSpartan-Bold.ttf", "LeagueSpartan-Bold.otf"],
     "League Spartan Bold": ["LeagueSpartan-Bold.ttf", "LeagueSpartan-Bold.otf"],
 }
 
@@ -80,6 +116,21 @@ def find_font(name="Montserrat ExtraBold"):
             matches = list(root.rglob(filename))
             if matches:
                 return str(matches[0])
+
+    # Última tentativa: localizar a família pelo nome informado.
+    # Isso também permite fontes personalizadas sem quebrar o gerador.
+    normalized = "".join(ch.lower() if ch.isalnum() else " " for ch in str(name)).split()
+    if normalized:
+        roots = [Path("/usr/share/fonts"), Path("/usr/local/share/fonts"), Path("fonts")]
+        for root in roots:
+            if not root.exists():
+                continue
+            for fp in root.rglob("*"):
+                if not fp.is_file() or fp.suffix.lower() not in {".ttf", ".otf"}:
+                    continue
+                fn = fp.stem.lower().replace("-", " ").replace("_", " ")
+                if all(part in fn for part in normalized):
+                    return str(fp)
 
     # Último fallback: DejaVu Sans Bold.
     fallback = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
@@ -159,7 +210,11 @@ def render_card(text, cfg):
     top = int(cfg.get("text_top", 270))
     bottom = int(cfg.get("text_bottom", 250))
     capacity = max(50, min(120, int(cfg.get("text_capacity", 100)))) / 100
-    max_w = max(100, W - left - right)
+    # A largura da área é um limite horizontal real e independente das margens.
+    # 600 px reproduz aproximadamente o bloco estreito e organizado do modelo de referência.
+    available_w = max(100, W - left - right)
+    configured_w = int(cfg.get("text_width", 600))
+    max_w = max(100, min(available_w, configured_w))
     max_h = max(100, int((H - top - bottom) * capacity))
     text_font_size = int(cfg.get("text_size", 82))
     min_size = max(24, int(text_font_size * 0.40))
@@ -190,9 +245,9 @@ def render_card(text, cfg):
     for i, line in enumerate(lines):
         width = line_widths[i]
         if cfg.get("alignment", "left") == "center":
-            x = (W - width) // 2
+            x = left + max(0, (max_w - width) // 2)
         elif cfg.get("alignment") == "right":
-            x = W - right - width
+            x = left + max(0, max_w - width)
         else:
             x = left
         draw.text((x, y), line, font=font, fill=cfg["text_color"])
