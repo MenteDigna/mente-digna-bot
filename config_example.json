@@ -1,0 +1,11 @@
+{
+  "background": "#FFFFFF",
+  "text_color": "#000000",
+  "quote_color": "#FF1717",
+  "font": "Montserrat ExtraBold",
+  "watermark": "@mentedigna",
+  "alignment": "left",
+  "uppercase": true,
+  "quotes": true,
+  "size": "1080x1350"
+}
