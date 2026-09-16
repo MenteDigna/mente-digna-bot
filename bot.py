@@ -94,7 +94,8 @@ media_batches = {}
 media_batch_tasks = {}
 
 MAX_BATCH_IMAGES = 10
-MEDIA_BATCH_DELAY = 2.0
+MEDIA_BATCH_DELAY = 1.5
+MEDIA_BATCH_QUIET = 1.5
 
 
 def is_allowed(update):
@@ -239,7 +240,7 @@ async def config_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def extract_text_from_image(image_bytes):
+def extract_text_from_image(image_bytes):
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     response = client.responses.create(
         model=MODEL,
@@ -264,43 +265,64 @@ async def extract_text_from_image(image_bytes):
 
 
 async def process_media_batch(uid, batch_key, context):
-    """Aguarda o álbum terminar de chegar, lê todas as imagens e oferece gerar todos."""
+    """Espera o álbum estabilizar, lê as imagens em paralelo e mostra as ações uma única vez."""
     try:
-        await asyncio.sleep(MEDIA_BATCH_DELAY)
+        # Debounce robusto: enquanto novas fotos chegam, o mesmo task apenas
+        # espera novamente. Assim nunca criamos várias mensagens para o mesmo álbum.
+        while True:
+            batch = media_batches.get(batch_key)
+            if not batch:
+                return
+            last_received = batch.get("last_received", 0.0)
+            wait_for = max(0.1, MEDIA_BATCH_QUIET - (asyncio.get_running_loop().time() - last_received))
+            if wait_for <= 0.1:
+                break
+            await asyncio.sleep(wait_for)
+
         batch = media_batches.get(batch_key)
         if not batch:
             return
+        if batch.get("processing"):
+            return
+        batch["processing"] = True
 
         items = list(batch.get("items", []))[:MAX_BATCH_IMAGES]
         if not items:
             return
 
-        await context.bot.send_message(
+        status = await context.bot.send_message(
             chat_id=uid,
             text=f"📚 Recebi {len(items)} imagens. Vou ler todas as frases... 🔎"
         )
 
-        texts = []
-        errors = []
-        for index, image_bytes in enumerate(items, start=1):
+        async def read_one(index, image_bytes):
             try:
-                text = await extract_text_from_image(image_bytes)
-                if text:
-                    texts.append(text)
-                else:
-                    errors.append(index)
+                text = await asyncio.to_thread(extract_text_from_image, image_bytes)
+                return index, text.strip() if text else "", None
             except Exception as e:
                 print(f"Erro ao ler imagem {index}: {e}")
+                return index, "", str(e)
+
+        # OCR em paralelo: reduz bastante o tempo quando há várias imagens.
+        results = await asyncio.gather(*(
+            read_one(index, image_bytes)
+            for index, image_bytes in enumerate(items, start=1)
+        ))
+
+        texts = []
+        errors = []
+        for index, text, error in results:
+            if text:
+                texts.append(text)
+            else:
                 errors.append(index)
 
         if not texts:
-            await context.bot.send_message(
-                chat_id=uid,
-                text="Não consegui identificar nenhuma frase nas imagens enviadas."
+            await status.edit_text(
+                "Não consegui identificar nenhuma frase nas imagens enviadas."
             )
             return
 
-        # Mantém o lote para o callback gerar todos os cards.
         batch["texts"] = texts
         batch["config"] = cfg_for(uid).copy()
         batch["errors"] = errors
@@ -308,23 +330,38 @@ async def process_media_batch(uid, batch_key, context):
 
         msg = (
             f"✅ {len(texts)} frases identificadas.\n\n"
-            "Agora você pode gerar todos os cards de uma vez."
+            "Escolha uma ação:"
         )
         if errors:
             msg += f"\n\n⚠️ Não consegui ler {len(errors)} imagem(ns)."
 
-        await context.bot.send_message(
-            chat_id=uid,
-            text=msg,
+        await status.edit_text(
+            msg,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(
                     f"🎨 GERAR TODOS OS {len(texts)} CARDS",
                     callback_data=f"generate_all:{batch_key}"
                 )],
-                [InlineKeyboardButton("📝 GERAR TODAS AS LEGENDAS", callback_data=f"caption_all:{batch_key}")],
-                [InlineKeyboardButton("✏️ EDITAR PRIMEIRA FRASE", callback_data=f"edit_batch:{batch_key}")],
+                [InlineKeyboardButton(
+                    "📝 GERAR TODAS AS LEGENDAS",
+                    callback_data=f"caption_all:{batch_key}"
+                )],
+                [InlineKeyboardButton(
+                    "✏️ EDITAR PRIMEIRA FRASE",
+                    callback_data=f"edit_batch:{batch_key}"
+                )],
             ])
         )
+    except asyncio.CancelledError:
+        # O task não é mais cancelado quando chegam novas fotos; mantemos este
+        # tratamento apenas para encerramento/restart do bot.
+        raise
+    except Exception as e:
+        print(f"Erro no lote {batch_key}: {e}")
+        try:
+            await context.bot.send_message(chat_id=uid, text=f"⚠️ Erro ao processar o lote: {e}")
+        except Exception:
+            pass
     finally:
         media_batch_tasks.pop(batch_key, None)
 
@@ -357,7 +394,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "uid": uid,
             "items": [],
             "ready": False,
+            "processing": False,
         })
+        batch["last_received"] = asyncio.get_running_loop().time()
 
         # Evita duplicação caso o Telegram reenfileire uma mensagem.
         message_id = update.message.message_id
@@ -369,12 +408,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data = await tg_file.download_as_bytearray()
             batch["items"].append(bytes(data))
 
-        old_task = media_batch_tasks.get(batch_key)
-        if old_task and not old_task.done():
-            old_task.cancel()
-        media_batch_tasks[batch_key] = asyncio.create_task(
-            process_media_batch(uid, batch_key, context)
-        )
+        # Um único task por álbum. Ele espera o período de silêncio acima;
+        # cada nova foto apenas atualiza last_received.
+        task = media_batch_tasks.get(batch_key)
+        if not task or task.done():
+            media_batch_tasks[batch_key] = asyncio.create_task(
+                process_media_batch(uid, batch_key, context)
+            )
         return
 
     # Imagem individual: mantém exatamente o fluxo anterior.
@@ -384,7 +424,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Lendo o texto... 🔎")
 
     try:
-        text = await extract_text_from_image(bytes(data))
+        text = await asyncio.to_thread(extract_text_from_image, bytes(data))
     except Exception as e:
         await update.message.reply_text(
             f"Não consegui ler a imagem.\n\nErro: {e}"
@@ -1058,19 +1098,35 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎨 Gerando {len(texts)} cards...\n\nNão feche o bot enquanto o processamento termina."
         )
 
+        async def render_one(index, text):
+            try:
+                out = await asyncio.to_thread(render_card, text, batch_config)
+                return index, out, None
+            except Exception as e:
+                print(f"Erro ao gerar card {index}: {e}")
+                return index, None, e
+
+        # Gera os arquivos em paralelo e só depois envia ao Telegram.
+        rendered = await asyncio.gather(*(
+            render_one(index, text)
+            for index, text in enumerate(texts, start=1)
+        ))
+
         success = 0
         failures = []
-        for index, text in enumerate(texts, start=1):
+        for index, out, error in rendered:
+            if error or not out:
+                failures.append(index)
+                continue
             try:
-                out = render_card(text, batch_config)
-                last_card_text[uid] = text
+                last_card_text[uid] = texts[index - 1]
                 await query.message.reply_document(
                     document=InputFile(out, filename=f"mente_digna_card_{index:02d}.png"),
                     caption=f"✅ Card {index}/{len(texts)}"
                 )
                 success += 1
             except Exception as e:
-                print(f"Erro ao gerar card {index}: {e}")
+                print(f"Erro ao enviar card {index}: {e}")
                 failures.append(index)
 
         summary = f"✅ Finalizado: {success}/{len(texts)} cards gerados."
