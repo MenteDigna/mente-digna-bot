@@ -2,6 +2,7 @@ import os
 import json
 import base64
 import re
+import asyncio
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -86,6 +87,14 @@ FONTS = [
 user_configs = {}
 pending_text = {}
 last_card_text = {}
+
+# Lotes de imagens enviadas como álbum no Telegram.
+# Cada álbum pode ter até 10 imagens e será processado como um único lote.
+media_batches = {}
+media_batch_tasks = {}
+
+MAX_BATCH_IMAGES = 10
+MEDIA_BATCH_DELAY = 2.0
 
 
 def is_allowed(update):
@@ -254,6 +263,72 @@ async def extract_text_from_image(image_bytes):
     return response.output_text.strip()
 
 
+async def process_media_batch(uid, batch_key, context):
+    """Aguarda o álbum terminar de chegar, lê todas as imagens e oferece gerar todos."""
+    try:
+        await asyncio.sleep(MEDIA_BATCH_DELAY)
+        batch = media_batches.get(batch_key)
+        if not batch:
+            return
+
+        items = list(batch.get("items", []))[:MAX_BATCH_IMAGES]
+        if not items:
+            return
+
+        await context.bot.send_message(
+            chat_id=uid,
+            text=f"📚 Recebi {len(items)} imagens. Vou ler todas as frases... 🔎"
+        )
+
+        texts = []
+        errors = []
+        for index, image_bytes in enumerate(items, start=1):
+            try:
+                text = await extract_text_from_image(image_bytes)
+                if text:
+                    texts.append(text)
+                else:
+                    errors.append(index)
+            except Exception as e:
+                print(f"Erro ao ler imagem {index}: {e}")
+                errors.append(index)
+
+        if not texts:
+            await context.bot.send_message(
+                chat_id=uid,
+                text="Não consegui identificar nenhuma frase nas imagens enviadas."
+            )
+            return
+
+        # Mantém o lote para o callback gerar todos os cards.
+        batch["texts"] = texts
+        batch["config"] = cfg_for(uid).copy()
+        batch["errors"] = errors
+        batch["ready"] = True
+
+        msg = (
+            f"✅ {len(texts)} frases identificadas.\n\n"
+            "Agora você pode gerar todos os cards de uma vez."
+        )
+        if errors:
+            msg += f"\n\n⚠️ Não consegui ler {len(errors)} imagem(ns)."
+
+        await context.bot.send_message(
+            chat_id=uid,
+            text=msg,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    f"🎨 GERAR TODOS OS {len(texts)} CARDS",
+                    callback_data=f"generate_all:{batch_key}"
+                )],
+                [InlineKeyboardButton("📝 GERAR TODAS AS LEGENDAS", callback_data=f"caption_all:{batch_key}")],
+                [InlineKeyboardButton("✏️ EDITAR PRIMEIRA FRASE", callback_data=f"edit_batch:{batch_key}")],
+            ])
+        )
+    finally:
+        media_batch_tasks.pop(batch_key, None)
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
@@ -272,6 +347,37 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Telegram envia um álbum como várias mensagens com o mesmo media_group_id.
+    # Em vez de processar a primeira imagem imediatamente, juntamos as mensagens
+    # por alguns instantes e depois processamos todas de uma vez.
+    media_group_id = update.message.media_group_id
+    if media_group_id:
+        batch_key = f"{uid}:{media_group_id}"
+        batch = media_batches.setdefault(batch_key, {
+            "uid": uid,
+            "items": [],
+            "ready": False,
+        })
+
+        # Evita duplicação caso o Telegram reenfileire uma mensagem.
+        message_id = update.message.message_id
+        seen_ids = batch.setdefault("message_ids", set())
+        if message_id not in seen_ids and len(batch["items"]) < MAX_BATCH_IMAGES:
+            seen_ids.add(message_id)
+            photo = update.message.photo[-1]
+            tg_file = await photo.get_file()
+            data = await tg_file.download_as_bytearray()
+            batch["items"].append(bytes(data))
+
+        old_task = media_batch_tasks.get(batch_key)
+        if old_task and not old_task.done():
+            old_task.cancel()
+        media_batch_tasks[batch_key] = asyncio.create_task(
+            process_media_batch(uid, batch_key, context)
+        )
+        return
+
+    # Imagem individual: mantém exatamente o fluxo anterior.
     photo = update.message.photo[-1]
     tg_file = await photo.get_file()
     data = await tg_file.download_as_bytearray()
@@ -931,6 +1037,92 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "edit":
         context.user_data["waiting_edit"] = True
         await query.edit_message_text("✏️ Envie agora o texto corrigido.")
+        return
+
+    elif d.startswith("generate_all:"):
+        batch_key = d.split(":", 1)[1]
+        batch = media_batches.get(batch_key)
+        if not batch or not batch.get("ready"):
+            await query.edit_message_text(
+                "Esse lote não está mais disponível. Envie as imagens novamente."
+            )
+            return
+
+        texts = batch.get("texts", [])
+        batch_config = batch.get("config") or cfg_for(uid).copy()
+        if not texts:
+            await query.edit_message_text("Não há frases para gerar.")
+            return
+
+        await query.edit_message_text(
+            f"🎨 Gerando {len(texts)} cards...\n\nNão feche o bot enquanto o processamento termina."
+        )
+
+        success = 0
+        failures = []
+        for index, text in enumerate(texts, start=1):
+            try:
+                out = render_card(text, batch_config)
+                last_card_text[uid] = text
+                await query.message.reply_document(
+                    document=InputFile(out, filename=f"mente_digna_card_{index:02d}.png"),
+                    caption=f"✅ Card {index}/{len(texts)}"
+                )
+                success += 1
+            except Exception as e:
+                print(f"Erro ao gerar card {index}: {e}")
+                failures.append(index)
+
+        summary = f"✅ Finalizado: {success}/{len(texts)} cards gerados."
+        if failures:
+            summary += "\n\n⚠️ Falharam: " + ", ".join(map(str, failures))
+        await query.message.reply_text(summary, reply_markup=main_menu())
+        return
+
+    elif d.startswith("caption_all:"):
+        batch_key = d.split(":", 1)[1]
+        batch = media_batches.get(batch_key)
+        if not batch or not batch.get("ready"):
+            await query.edit_message_text("Esse lote não está mais disponível.")
+            return
+
+        texts = batch.get("texts", [])
+        await query.edit_message_text(f"📝 Gerando {len(texts)} legendas...")
+        for index, text in enumerate(texts, start=1):
+            try:
+                response = client.responses.create(
+                    model=MODEL,
+                    instructions=(
+                        "Crie uma legenda longa e envolvente para Instagram baseada na frase enviada. "
+                        "Escreva em português do Brasil, com tom reflexivo, emocional, natural e profissional. "
+                        "A legenda deve ter EXATAMENTE 4 parágrafos, separados por uma linha em branco. "
+                        "O primeiro deve criar identificação e reflexão; o segundo aprofundar a mensagem; "
+                        "o terceiro transformar a reflexão em uma ideia prática ou mudança de mentalidade; "
+                        "o quarto deve terminar com uma pergunta natural que incentive comentários. "
+                        "Não repita a frase integralmente. Não use hashtags, títulos, números ou observações."
+                    ),
+                    input=text
+                )
+                await query.message.reply_text(
+                    f"📝 Legenda {index}/{len(texts)}\n\n{response.output_text.strip()}"
+                )
+            except Exception as e:
+                await query.message.reply_text(f"⚠️ Erro na legenda {index}: {e}")
+        await query.message.reply_text("✅ Todas as legendas foram processadas.", reply_markup=main_menu())
+        return
+
+    elif d.startswith("edit_batch:"):
+        batch_key = d.split(":", 1)[1]
+        batch = media_batches.get(batch_key)
+        if not batch or not batch.get("texts"):
+            await query.edit_message_text("Esse lote não está mais disponível.")
+            return
+        pending_text[uid] = batch["texts"][0]
+        context.user_data["waiting_edit"] = True
+        await query.edit_message_text(
+            "✏️ Envie a correção da primeira frase.\n\n"
+            "Se quiser editar todas, você pode enviar as frases corrigidas separadas por linha em branco."
+        )
         return
 
     elif d == "generate":
